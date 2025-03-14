@@ -1,0 +1,623 @@
+import sys
+import tkinter as tk
+from tkinter import ttk, messagebox
+import spotipy
+from spotipy.oauth2 import SpotifyOAuth
+
+
+class SpotifyController:
+    def __init__(self, client_id, client_secret, redirect_uri):
+        self.scope = "user-read-playback-state user-modify-playback-state user-read-currently-playing app-remote-control streaming"
+        self.sp = spotipy.Spotify(
+            auth_manager=SpotifyOAuth(
+                client_id=client_id,
+                client_secret=client_secret,
+                redirect_uri=redirect_uri,
+                scope=self.scope,
+                cache_path=".spotifycache"  # Cache the token to avoid re-authenticating
+            ),
+            retries=3,  # Number of retries for API calls
+            status_retries=3,  # Number of retries for status errors
+            backoff_factor=0.5  # Exponential backoff factor
+        )
+
+        
+        self.current_device = None
+        self.devices = []
+        self.current_track = None
+        self.is_playing = False
+
+        #GUI
+        self.root = tk.Tk()
+        self.root.title("Spotify Controller")
+        self.root.geometry("600x400")
+        self.root.resizable(True, True)
+
+        self.tab_control = ttk.Notebook(self.root)
+
+        self.main_tab = ttk.Frame(self.tab_control)
+        self.tab_control.add(self.main_tab, text="Player")
+
+        self.search_tab = ttk.Frame(self.tab_control)
+        self.tab_control.add(self.search_tab, text="Search")
+
+        self.radio_tab = ttk.Frame(self.tab_control)
+        self.tab_control.add(self.radio_tab, text="Radio")
+
+        self.settings_tab = ttk.Frame(self.tab_control)
+        self.tab_control.add(self.settings_tab, text="Settings")
+
+        self.tab_control.pack(expand=1, fill="both")
+
+        # Set up each tab
+        self.setup_main_tab()
+        self.setup_search_tab()
+        self.setup_radio_tab()
+        self.setup_settings_tab()
+
+        self.refresh_devices()
+        
+        self.update_now_playing()
+
+    def setup_main_tab(self):
+        # Now playing frame
+        now_playing_frame = ttk.LabelFrame(self.main_tab, text="Now Playing")
+        now_playing_frame.pack(padx=10, pady=10, fill="x")
+
+        self.track_label = ttk.Label(now_playing_frame, text="No track playing")
+        self.track_label.pack(padx=10, pady=10)
+
+        self.artist_label = ttk.Label(now_playing_frame, text="")
+        self.artist_label.pack(padx=10, pady=2)
+
+        # Control frame
+        control_frame = ttk.Frame(self.main_tab)
+        control_frame.pack(padx=10, pady=10, fill="x")
+
+        # Device selection
+        device_frame = ttk.Frame(control_frame)
+        device_frame.pack(pady=5, fill="x")
+
+        ttk.Label(device_frame, text="Device:").pack(side="left", padx=5)
+        self.device_var = tk.StringVar()
+        self.device_dropdown = ttk.Combobox(device_frame, textvariable=self.device_var, state="readonly")
+        self.device_dropdown.pack(side="left", padx=5, fill="x", expand=True)
+        self.device_dropdown.bind("<<ComboboxSelected>>", self.on_device_selected)
+
+        refresh_button = ttk.Button(device_frame, text="Refresh", command=self.refresh_devices)
+        refresh_button.pack(side="right", padx=5)
+
+        # Playback controls
+        playback_frame = ttk.Frame(control_frame)
+        playback_frame.pack(pady=10)
+
+        btn_rewind = ttk.Button(playback_frame, text="⏮", width=5, command=self.previous_track)
+        btn_rewind.pack(side="left", padx=5)
+
+        self.play_pause_button = ttk.Button(playback_frame, text="▶", width=5, command=self.toggle_playback)
+        self.play_pause_button.pack(side="left", padx=5)
+
+        btn_skip = ttk.Button(playback_frame, text="⏭", width=5, command=self.next_track)
+        btn_skip.pack(side="left", padx=5)
+
+        # Volume control
+        volume_frame = ttk.Frame(control_frame)
+        volume_frame.pack(pady=10, fill="x")
+
+        ttk.Label(volume_frame, text="Volume:").pack(side="left", padx=5)
+        self.volume_var = tk.IntVar(value=50)
+        volume_scale = ttk.Scale(
+            volume_frame,
+            from_=0,
+            to=100,
+            orient="horizontal",
+            variable=self.volume_var,
+            command=lambda x: self.set_volume(self.volume_var.get())
+        )
+        volume_scale.pack(side="left", padx=5, fill="x", expand=True)
+
+    def setup_search_tab(self):
+        # Search frame
+        search_frame = ttk.Frame(self.search_tab)
+        search_frame.pack(padx=10, pady=10, fill="both", expand=True)
+
+        search_entry_frame = ttk.Frame(search_frame)
+        search_entry_frame.pack(fill="x", pady=5)
+
+        ttk.Label(search_entry_frame, text="Search:").pack(side="left", padx=5)
+        self.search_var = tk.StringVar()
+        search_entry = ttk.Entry(search_entry_frame, textvariable=self.search_var)
+        search_entry.pack(side="left", padx=5, fill="x", expand=True)
+
+        search_type_frame = ttk.Frame(search_frame)
+        search_type_frame.pack(fill="x", pady=5)
+
+        ttk.Label(search_type_frame, text="Type:").pack(side="left", padx=5)
+        self.search_type_var = tk.StringVar(value="track")
+        search_type_combo = ttk.Combobox(
+            search_type_frame,
+            textvariable=self.search_type_var,
+            values=["track", "album", "artist", "playlist"],
+            state="readonly"
+        )
+        search_type_combo.pack(side="left", padx=5)
+
+        # Search button
+        search_button = ttk.Button(search_frame, text="Search", command=self.search)
+        search_button.pack(pady=10)
+
+        # Results frame
+        results_frame = ttk.LabelFrame(search_frame, text="Results")
+        results_frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+        # Results listbox with scrollbar
+        self.results_listbox = tk.Listbox(results_frame)
+        self.results_listbox.pack(side="left", fill="both", expand=True)
+
+        results_scrollbar = ttk.Scrollbar(results_frame, orient="vertical", command=self.results_listbox.yview)
+        results_scrollbar.pack(side="right", fill="y")
+        self.results_listbox.config(yscrollcommand=results_scrollbar.set)
+
+        # Play button
+        play_button = ttk.Button(search_frame, text="Play Selected", command=self.play_selected)
+        play_button.pack(pady=10)
+
+    def setup_radio_tab(self):
+        # Radio stations frame
+        radio_frame = ttk.Frame(self.radio_tab)
+        radio_frame.pack(padx=10, pady=10, fill="both", expand=True)
+
+        ttk.Label(radio_frame, text="Spotify Radio Stations").pack(pady=5)
+
+        # Radio types
+        radio_types_frame = ttk.Frame(radio_frame)
+        radio_types_frame.pack(fill="x", pady=5)
+
+        ttk.Label(radio_types_frame, text="Based on:").pack(side="left", padx=5)
+        self.radio_type_var = tk.StringVar(value="track")
+        radio_type_combo = ttk.Combobox(
+            radio_types_frame,
+            textvariable=self.radio_type_var,
+            values=["Current Track", "Artist", "Genre", "Playlist"],
+            state="readonly"
+        )
+        radio_type_combo.pack(side="left", padx=5)
+
+       
+        radio_search_frame = ttk.Frame(radio_frame)
+        radio_search_frame.pack(fill="x", pady=5)
+
+        ttk.Label(radio_search_frame, text="Search:").pack(side="left", padx=5)
+        self.radio_search_var = tk.StringVar()
+        radio_search_entry = ttk.Entry(radio_search_frame, textvariable=self.radio_search_var)
+        radio_search_entry.pack(side="left", padx=5, fill="x", expand=True)
+
+        
+        start_radio_button = ttk.Button(radio_frame, text="Start Radio", command=self.start_radio)
+        start_radio_button.pack(pady=10)
+
+        # Radio presets
+        presets_frame = ttk.LabelFrame(radio_frame, text="Quick Radio Presets")
+        presets_frame.pack(fill="both", expand=True, padx=5, pady=10)
+
+       
+        preset_buttons = [
+            ("Discover Weekly", self.start_discover_weekly),
+            ("Release Radar", self.start_release_radar),
+            ("Top Hits", self.start_top_hits),
+            ("Chill Vibes", self.start_chill_vibes)
+        ]
+
+        for i, (name, command) in enumerate(preset_buttons):
+            btn = ttk.Button(presets_frame, text=name, command=command)
+            btn.grid(row=i // 2, column=i % 2, padx=5, pady=5, sticky="ew")
+
+        presets_frame.grid_columnconfigure(0, weight=1)
+        presets_frame.grid_columnconfigure(1, weight=1)
+
+    def setup_settings_tab(self):
+       
+        settings_frame = ttk.Frame(self.settings_tab)
+        settings_frame.pack(padx=10, pady=10, fill="both", expand=True)
+
+        
+        auto_connect_frame = ttk.Frame(settings_frame)
+        auto_connect_frame.pack(fill="x", pady=5)
+
+        self.auto_connect_var = tk.BooleanVar(value=True)
+        auto_connect_cb = ttk.Checkbutton(
+            auto_connect_frame,
+            text="Auto-connect to last used device on startup",
+            variable=self.auto_connect_var
+        )
+        auto_connect_cb.pack(side="left", padx=5)
+
+       
+        auto_refresh_frame = ttk.Frame(settings_frame)
+        auto_refresh_frame.pack(fill="x", pady=5)
+
+        self.auto_refresh_var = tk.BooleanVar(value=True)
+        auto_refresh_cb = ttk.Checkbutton(
+            auto_refresh_frame,
+            text="Auto-refresh now playing information",
+            variable=self.auto_refresh_var
+        )
+        auto_refresh_cb.pack(side="left", padx=5)
+
+  
+        refresh_frame = ttk.Frame(settings_frame)
+        refresh_frame.pack(fill="x", pady=5)
+
+        ttk.Label(refresh_frame, text="Refresh interval (seconds):").pack(side="left", padx=5)
+        self.refresh_interval_var = tk.IntVar(value=3)
+        refresh_spinbox = ttk.Spinbox(
+            refresh_frame,
+            from_=1,
+            to=10,
+            textvariable=self.refresh_interval_var,
+            width=5
+        )
+        refresh_spinbox.pack(side="left", padx=5)
+
+        # Connection status
+        status_frame = ttk.LabelFrame(settings_frame, text="Connection Status")
+        status_frame.pack(fill="x", pady=10)
+
+        self.connection_status = ttk.Label(status_frame, text="Connected to Spotify")
+        self.connection_status.pack(padx=10, pady=5)
+
+        # Reconnect button
+        reconnect_button = ttk.Button(status_frame, text="Reconnect", command=self.reconnect)
+        reconnect_button.pack(pady=5)
+
+    # Functional methods
+    def refresh_devices(self):
+        try:
+            devices = self.sp.devices()
+            self.devices = devices['devices']
+            device_names = [f"{d['name']} ({d['type']})" for d in self.devices]
+
+            self.device_dropdown['values'] = device_names
+
+            if device_names and not self.device_var.get():
+                self.device_var.set(device_names[0])
+                self.current_device = self.devices[0]['id']
+
+            self.update_now_playing()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to refresh devices: {str(e)}")
+
+    def on_device_selected(self, event):
+        selection = self.device_dropdown.current()
+        if selection >= 0 and selection < len(self.devices):
+            self.current_device = self.devices[selection]['id']
+
+    def toggle_playback(self):
+        try:
+            if not self.current_device:
+                self.refresh_devices()
+                if not self.current_device:
+                    messagebox.showinfo("No Device", "Please select a device first.")
+                    return
+
+            if self.is_playing:
+                self.sp.pause_playback(device_id=self.current_device)
+                self.play_pause_button.config(text="▶")
+                self.is_playing = False
+            else:
+                self.sp.start_playback(device_id=self.current_device)
+                self.play_pause_button.config(text="⏸")
+                self.is_playing = True
+
+            self.update_now_playing()
+        except Exception as e:
+            messagebox.showerror("Playback Error", f"Failed to toggle playback: {str(e)}")
+
+    def next_track(self):
+        try:
+            if not self.current_device:
+                messagebox.showinfo("No Device", "Please select a device first.")
+                return
+
+            self.sp.next_track(device_id=self.current_device)
+            self.update_now_playing()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to skip track: {str(e)}")
+
+    def previous_track(self):
+        try:
+            if not self.current_device:
+                messagebox.showinfo("No Device", "Please select a device first.")
+                return
+
+            self.sp.previous_track(device_id=self.current_device)
+            self.update_now_playing()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to go to previous track: {str(e)}")
+
+    def set_volume(self, volume):
+        try:
+            if not self.current_device:
+                return
+
+            # Only send volume changes when slider is released to avoid API rate limits
+            # This is a bit of a workaround since ttk.Scale doesn't have a command_release event
+            self.root.after(500, lambda: self.sp.volume(int(volume), device_id=self.current_device))
+        except Exception as e:
+            pass  # Silent fail for volume changes to avoid error spam
+
+    def update_now_playing(self):
+        try:
+            current = self.sp.current_playback()
+            if current and current['item']:
+                track = current['item']['name']
+                artists = ", ".join([artist['name'] for artist in current['item']['artists']])
+
+                self.track_label.config(text=track)
+                self.artist_label.config(text=artists)
+
+                self.is_playing = current['is_playing']
+                self.play_pause_button.config(text="⏸" if self.is_playing else "▶")
+
+                if current['device']:
+                    device_name = f"{current['device']['name']} ({current['device']['type']})"
+                    self.device_var.set(device_name)
+                    self.current_device = current['device']['id']
+
+                if 'volume_percent' in current['device']:
+                    self.volume_var.set(current['device']['volume_percent'])
+            else:
+                self.track_label.config(text="No track playing")
+                self.artist_label.config(text="")
+                self.is_playing = False
+                self.play_pause_button.config(text="▶")
+        except Exception as e:
+            self.connection_status.config(text=f"Error: {str(e)}")
+
+        
+        if self.auto_refresh_var.get():
+            self.root.after(self.refresh_interval_var.get() * 1000, self.update_now_playing)
+
+    def search(self):
+        query = self.search_var.get()
+        search_type = self.search_type_var.get()
+
+        if not query:
+            return
+
+        try:
+            self.results_listbox.delete(0, tk.END)
+            results = self.sp.search(q=query, type=search_type, limit=20)
+
+            self.search_results = []
+
+            if search_type == 'track':
+                for i, item in enumerate(results['tracks']['items']):
+                    artists = ", ".join([artist['name'] for artist in item['artists']])
+                    display = f"{item['name']} - {artists}"
+                    self.results_listbox.insert(tk.END, display)
+                    self.search_results.append(item)
+            elif search_type == 'album':
+                for i, item in enumerate(results['albums']['items']):
+                    artists = ", ".join([artist['name'] for artist in item['artists']])
+                    display = f"{item['name']} - {artists}"
+                    self.results_listbox.insert(tk.END, display)
+                    self.search_results.append(item)
+            elif search_type == 'artist':
+                for i, item in enumerate(results['artists']['items']):
+                    self.results_listbox.insert(tk.END, item['name'])
+                    self.search_results.append(item)
+            elif search_type == 'playlist':
+                for i, item in enumerate(results['playlists']['items']):
+                    self.results_listbox.insert(tk.END, f"{item['name']} by {item['owner']['display_name']}")
+                    self.search_results.append(item)
+        except Exception as e:
+            messagebox.showerror("Search Error", f"Failed to search: {str(e)}")
+
+    def play_selected(self):
+        selection = self.results_listbox.curselection()
+        if not selection:
+            return
+
+        if not self.current_device:
+            messagebox.showinfo("No Device", "Please select a device first.")
+            return
+
+        selected_index = selection[0]
+
+        try:
+            search_type = self.search_type_var.get()
+            selected_item = self.search_results[selected_index]
+
+            if search_type == 'track':
+                self.sp.start_playback(device_id=self.current_device, uris=[selected_item['uri']])
+            elif search_type == 'album':
+                self.sp.start_playback(device_id=self.current_device, context_uri=selected_item['uri'])
+            elif search_type == 'artist':
+                self.sp.start_playback(device_id=self.current_device, context_uri=selected_item['uri'])
+            elif search_type == 'playlist':
+                self.sp.start_playback(device_id=self.current_device, context_uri=selected_item['uri'])
+
+            self.is_playing = True
+            self.play_pause_button.config(text="⏸")
+            self.tab_control.select(self.main_tab)  # Switch to main tab after playing
+            self.update_now_playing()
+        except Exception as e:
+            messagebox.showerror("Playback Error", f"Failed to play selection: {str(e)}")
+
+    def start_radio(self):
+        radio_type = self.radio_type_var.get()
+        query = self.radio_search_var.get()
+
+        if not query and radio_type != "Current Track":
+            messagebox.showinfo("Input Required", "Please enter a search term for radio.")
+            return
+
+        try:
+            if not self.current_device:
+                messagebox.showinfo("No Device", "Please select a device first.")
+                return
+
+            if radio_type == "Current Track":
+                current = self.sp.current_playback()
+                if current and current['item']:
+                    track_id = current['item']['id']
+                    recommendations = self.sp.recommendations(seed_tracks=[track_id], limit=50)
+                    track_uris = [track['uri'] for track in recommendations['tracks']]
+                    self.sp.start_playback(device_id=self.current_device, uris=track_uris)
+                else:
+                    messagebox.showinfo("No Track", "No track currently playing.")
+                    return
+            else:
+                # For other radio types, search first
+                search_mapping = {
+                    "Artist": "artist",
+                    "Genre": "genre",
+                    "Playlist": "playlist"
+                }
+
+                search_type = search_mapping.get(radio_type, "track")
+                results = self.sp.search(q=query, type=search_type, limit=1)
+
+                if search_type == "artist" and results['artists']['items']:
+                    artist_id = results['artists']['items'][0]['id']
+                    recommendations = self.sp.recommendations(seed_artists=[artist_id], limit=50)
+                    track_uris = [track['uri'] for track in recommendations['tracks']]
+                    self.sp.start_playback(device_id=self.current_device, uris=track_uris)
+                elif search_type == "genre":
+                    # For genre, need to use the query directly
+                    available_genres = self.sp.recommendation_genre_seeds()
+                    matching_genres = [g for g in available_genres['genres'] if query.lower() in g.lower()]
+
+                    if matching_genres:
+                        recommendations = self.sp.recommendations(seed_genres=[matching_genres[0]], limit=50)
+                        track_uris = [track['uri'] for track in recommendations['tracks']]
+                        self.sp.start_playback(device_id=self.current_device, uris=track_uris)
+                    else:
+                        messagebox.showinfo("Genre Not Found", "Genre not found. Try another genre.")
+                        return
+                elif search_type == "playlist" and results['playlists']['items']:
+                    # For playlist, just play the playlist
+                    playlist_uri = results['playlists']['items'][0]['uri']
+                    self.sp.start_playback(device_id=self.current_device, context_uri=playlist_uri)
+                else:
+                    messagebox.showinfo("Not Found", "Could not find matching content.")
+                    return
+
+            self.is_playing = True
+            self.play_pause_button.config(text="⏸")
+            self.tab_control.select(self.main_tab)  # Switch to main tab after playing
+            self.update_now_playing()
+        except Exception as e:
+            messagebox.showerror("Radio Error", f"Failed to start radio: {str(e)}")
+
+    # some radio preset methods
+    def start_discover_weekly(self):
+        try:
+            if not self.current_device:
+                messagebox.showinfo("No Device", "Please select a device first.")
+                return
+
+            results = self.sp.search(q="Discover Weekly", type="playlist", limit=1)
+            if results['playlists']['items']:
+                playlist_uri = results['playlists']['items'][0]['uri']
+                self.sp.start_playback(device_id=self.current_device, context_uri=playlist_uri)
+
+                self.is_playing = True
+                self.play_pause_button.config(text="⏸")
+                self.tab_control.select(self.main_tab)
+                self.update_now_playing()
+            else:
+                messagebox.showinfo("Not Found", "Could not find Discover Weekly playlist.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to start Discover Weekly: {str(e)}")
+
+    def start_release_radar(self):
+        try:
+            if not self.current_device:
+                messagebox.showinfo("No Device", "Please select a device first.")
+                return
+
+            results = self.sp.search(q="Release Radar", type="playlist", limit=1)
+            if results['playlists']['items']:
+                playlist_uri = results['playlists']['items'][0]['uri']
+                self.sp.start_playback(device_id=self.current_device, context_uri=playlist_uri)
+
+                self.is_playing = True
+                self.play_pause_button.config(text="⏸")
+                self.tab_control.select(self.main_tab)
+                self.update_now_playing()
+            else:
+                messagebox.showinfo("Not Found", "Could not find Release Radar playlist.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to start Release Radar: {str(e)}")
+
+    def start_top_hits(self):
+        try:
+            if not self.current_device:
+                messagebox.showinfo("No Device", "Please select a device first.")
+                return
+
+            results = self.sp.search(q="Today's Top Hits", type="playlist", limit=1)
+            if results['playlists']['items']:
+                playlist_uri = results['playlists']['items'][0]['uri']
+                self.sp.start_playback(device_id=self.current_device, context_uri=playlist_uri)
+
+                self.is_playing = True
+                self.play_pause_button.config(text="⏸")
+                self.tab_control.select(self.main_tab)
+                self.update_now_playing()
+            else:
+                messagebox.showinfo("Not Found", "Could not find Top Hits playlist.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to start Top Hits: {str(e)}")
+
+    def start_chill_vibes(self):
+        try:
+            if not self.current_device:
+                messagebox.showinfo("No Device", "Please select a device first.")
+                return
+
+            results = self.sp.search(q="Chill Vibes", type="playlist", limit=1)
+            if results['playlists']['items']:
+                playlist_uri = results['playlists']['items'][0]['uri']
+                self.sp.start_playback(device_id=self.current_device, context_uri=playlist_uri)
+
+                self.is_playing = True
+                self.play_pause_button.config(text="⏸")
+                self.tab_control.select(self.main_tab)
+                self.update_now_playing()
+            else:
+                messagebox.showinfo("Not Found", "Could not find Chill Vibes playlist.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to start Chill Vibes: {str(e)}")
+
+    def reconnect(self):
+        try:
+            # Forcing a token refresh
+            self.sp.auth_manager.get_access_token(as_dict=False)
+            self.connection_status.config(text="Connected to Spotify")
+            self.refresh_devices()
+        except Exception as e:
+            self.connection_status.config(text=f"Connection error: {str(e)}")
+            messagebox.showerror("Connection Error", f"Failed to reconnect: {str(e)}")
+
+    def run(self):
+        self.root.mainloop()
+
+
+def main():
+    CLIENT_ID = "17883f84d5314da58d5f2c323801492f"
+    CLIENT_SECRET = "77a4c053baae4a6ba9b300aad661e80b"
+    REDIRECT_URI = "http://127.0.0.1:8888/callback/"
+
+    try:
+        app = SpotifyController(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI)
+        app.run()
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to initialize: {str(e)}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
