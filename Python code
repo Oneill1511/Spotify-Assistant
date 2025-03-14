@@ -607,9 +607,9 @@ class SpotifyController:
 
 
 def main():
-    CLIENT_ID = "17883f84d5314da58d5f2c323801492f"
-    CLIENT_SECRET = "77a4c053baae4a6ba9b300aad661e80b"
-    REDIRECT_URI = "http://127.0.0.1:8888/callback/"
+    CLIENT_ID = ""
+    CLIENT_SECRET = ""
+    REDIRECT_URI = ""
 
     try:
         app = SpotifyController(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI)
